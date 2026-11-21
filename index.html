@@ -477,7 +477,7 @@ function subscribeToNotifications(){
       const item={id:row.id,type:row.type,fromUser:usernameForAuthId(row.actor_id),referenceId:row.reference_id,read:!!row.is_read,createdAt:new Date(row.created_at).getTime()};
       const list=(DB.notifications[session.username] ||= []);
       if(!list.some(n=>n.id===item.id)) list.unshift(item);
-      toast((item.fromUser==='user_'+String(row.actor_id).slice(0,8)?'Someone':'@'+item.fromUser)+' '+(item.type==='like'?'liked your post ❤️':'commented on your post 💬'));
+      toast((item.fromUser==='user_'+String(row.actor_id).slice(0,8)?'Someone':'@'+item.fromUser)+' '+(item.type==='friend_request'?'sent you a friend request 👥':item.type==='like'?'liked your post ❤️':item.type==='comment'?'commented on your post 💬':'sent you a notification'));
       renderApp();
     }).subscribe(status=>{if(status==='CHANNEL_ERROR') console.warn('Enable notifications in the supabase_realtime publication.');});
 }
@@ -744,6 +744,7 @@ async function loadSupabasePosts(){
     (DB.follows[follower] ||= {followers:[],following:[]}).following.push(following);
     (DB.follows[following] ||= {followers:[],following:[]}).followers.push(follower);
   });
+
 }
 async function createPost({images, caption, hashtags, category, groupId}){
   if(!session?.id || !supabaseClient) throw new Error('Please log in before publishing.');
@@ -911,35 +912,40 @@ async function sharePost(postId){
   catch(e){ toast('Post link: '+url); }
 }
 
-/* ================= FOLLOW ================= */
-async function toggleFollow(target){
-  if(!session?.id || !supabaseClient){ toast('Please log in to follow users.'); return; }
-  const targetUser=DB.users[target];
-  if(!targetUser?.id){ toast('This user profile is not available yet.'); return; }
-  try{
-    const already=isFollowing(target);
-    if(already){
-      const {error}=await supabaseClient.from('follows').delete()
-        .eq('follower_id',session.id).eq('following_id',targetUser.id);
-      if(error) throw error;
-    }else{
-      const {error}=await supabaseClient.from('follows').insert({follower_id:session.id,following_id:targetUser.id});
-      if(error) throw error;
-      notify(target,'follow',session.username,null);
-    }
-    await loadSupabasePosts();
-    renderApp();
-  }catch(err){ console.error('Follow error:',err); toast('Could not update follow: '+(err.message||'Please try again.')); }
+/* ================= FOLLOW / UNFOLLOW ================= */
+function isFollowing(target){ return (DB.follows?.[session?.username]?.following||[]).includes(target); }
+function followButton(target){
+  return isFollowing(target)
+    ? `<button class="btn btn-ghost btn-sm" onclick="unfollowUser('${target}')">Following</button>`
+    : `<button class="btn btn-primary btn-sm" onclick="followUser('${target}')">Follow</button>`;
 }
-function isFollowing(target){ return (DB.follows[session?.username]?.following||[]).includes(target); }
+async function refreshFollows(){ await loadSupabasePosts(); }
+async function followUser(target){
+  const person=DB.users[target];
+  if(!session?.id || !person?.id || target===session.username || !supabaseClient) return;
+  if(isFollowing(target)) return;
+  try{
+    const {error}=await supabaseClient.from('follows').insert({follower_id:session.id,following_id:person.id});
+    if(error) throw error;
+    await refreshFollows(); renderApp(); toast('You are now following @'+target+'.');
+  }catch(e){ console.error(e); toast(e.message||'Could not follow this user.'); }
+}
+async function unfollowUser(target){
+  const person=DB.users[target];
+  if(!session?.id || !person?.id || !supabaseClient || !isFollowing(target)) return;
+  if(!confirm('Unfollow @'+target+'?')) return;
+  try{
+    const {error}=await supabaseClient.from('follows').delete().eq('follower_id',session.id).eq('following_id',person.id);
+    if(error) throw error;
+    await refreshFollows(); renderApp(); toast('You unfollowed @'+target+'.');
+  }catch(e){ console.error(e); toast(e.message||'Could not unfollow this user.'); }
+}
 function openFollowList(username,kind){ go('followList',{username,kind}); }
 function renderFollowList(username,kind){
-  const user=DB.users[username];
-  if(!user) return `<div class="empty">User not found.</div>`;
-  const names=DB.follows[username]?.[kind]||[];
+  const user=DB.users[username]; if(!user) return `<div class="empty">User not found.</div>`;
+  const names=DB.follows?.[username]?.[kind]||[];
   const title=kind==='followers'?'Followers':'Following';
-  return `<div class="pagehead"><button class="btn btn-ghost btn-sm" onclick="go('profile',{username:'${username}'})">← Back to profile</button><h2 style="margin-top:18px">${title}</h2><div class="faint">@${esc(username)} · ${names.length} ${title.toLowerCase()}</div></div>
-    <div class="card" style="padding:8px 16px;margin-top:14px">${names.length?names.map(name=>{const person=DB.users[name];return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)"><a onclick="go('profile',{username:'${name}'})">${avatarHTML(name,44)}</a><div style="flex:1;min-width:0"><div style="font-weight:650">${esc(person?.name||name)}</div><div class="faint">@${esc(name)}</div></div>${name!==session.username?`<button class="btn btn-sm ${isFollowing(name)?'btn-ghost':'btn-primary'}" onclick="toggleFollow('${name}')">${isFollowing(name)?'Following':'Follow'}</button>`:''}</div>`}).join(''):`<div class="empty">No ${title.toLowerCase()} yet.</div>`}</div>`;
+  return `<div class="pagehead"><button class="btn btn-ghost btn-sm" onclick="go('profile',{username:'${username}'})">← Back to profile</button><h2 style="margin-top:18px">${title}</h2><div class="faint">${names.length} ${title.toLowerCase()}</div></div><div class="card" style="padding:8px 16px;margin-top:14px">${names.length?names.map(name=>`<div style="display:flex;align-items:center;gap:12px;padding:12px 0">${avatarHTML(name,44)}<div style="flex:1">${esc(DB.users[name]?.name||name)}<div class="faint">@${esc(name)}</div></div></div>`).join(''):'<div class="empty">No '+title.toLowerCase()+' yet.</div>'}</div>`;
 }
 
 /* ================= GROUPS ================= */
@@ -1209,7 +1215,8 @@ function layout(innerHTML, activeNav){
         <div class="brand" style="padding:0">${moonMark(24)}<span class="word" style="font-size:18px">Nyctophile</span></div>
         <div style="display:flex;gap:10px">
           <button class="btn-icon" aria-label="Notifications" title="Notifications" onclick="go('notifications')" style="position:relative;display:grid;place-items:center">${ICONS.bell}${nc>0?`<span class="badge" style="position:absolute;top:-4px;right:-4px">${nc}</span>`:''}</button>
-          <button class="btn-icon" onclick="go('profile',{username:session.username})">${avatarHTML(session.username,34)}</button>
+          <button class="btn-icon" aria-label="Log out" title="Log out" onclick="handleLogout()">${ICONS.lock}</button>
+          <button class="btn-icon" aria-label="Profile" title="Profile" onclick="go('profile',{username:session.username})">${avatarHTML(session.username,34)}</button>
         </div>
       </div>
       ${innerHTML}
@@ -1620,9 +1627,8 @@ function renderProfile(username){
   if(!u) return `<div class="empty">User not found.</div>`;
   const mine = username===session.username;
   const posts = Object.values(DB.posts).filter(p=>p.userId===username).sort((a,b)=>b.createdAt-a.createdAt);
-  const followers = DB.follows[username]?.followers||[];
-  const following = DB.follows[username]?.following||[];
-  const following_them = isFollowing(username);
+  const followers = DB.follows[username]?.followers || [];
+  const following = DB.follows[username]?.following || [];
   const tab = uiState.profileTab;
   return `<div class="pagehead">
     <div class="profile-head">
@@ -1642,7 +1648,7 @@ function renderProfile(username){
         </div>
         <div style="display:flex;gap:10px">
           ${mine?`<button class="btn btn-ghost btn-sm" onclick="go('editProfile')">Edit profile</button><button class="btn btn-ghost btn-sm" onclick="go('saved')">Saved</button>`:
-          `<button class="btn ${following_them?'btn-ghost':'btn-primary'} btn-sm" onclick="toggleFollow('${username}')">${following_them?'Following':'Follow'}</button>
+          `${followButton(username)}
           <button class="btn btn-ghost btn-sm" onclick="openConversation('${username}')">Message</button>
           <button class="btn btn-ghost btn-sm" onclick="openReport('user','${username}')">Report</button>`}
         </div>
@@ -1653,10 +1659,11 @@ function renderProfile(username){
     <div class="tabbtn ${tab==='posts'?'active':''}" onclick="uiState.profileTab='posts';renderApp()">POSTS</div>
   </div>
   <div style="padding-top:14px">
-  ${posts.length? `<div class="grid3">${posts.map(p=>`<div class="cell" onclick="go('home');setTimeout(()=>document.querySelector('[data-post=\\'${p.id}\\']')?.scrollIntoView(),50)"><img src="${(p.images&&p.images[0])||''}"></div>`).join('')}</div>`
+  ${posts.length? `<div class="grid3">${posts.map(p=>`<div class="cell" onclick="go('home');setTimeout(()=>document.querySelector('[data-post=\'${p.id}\']')?.scrollIntoView(),50)"><img src="${(p.images&&p.images[0])||''}"></div>`).join('')}</div>`
     : `<div class="empty"><div class="moon">🌙</div>${mine?'No posts yet — share your first moment.':'No posts yet.'}</div>`}
   </div>`;
 }
+
 function renderEditProfile(){
   const u = DB.users[session.username];
   return `<div class="authwrap" style="min-height:auto;padding:30px 0"><div class="card authcard" style="max-width:460px">
@@ -1769,6 +1776,40 @@ async function openNotificationPost(postId){
     }else{ toast('Post loaded, but it is not currently visible in your feed.'); }
   },80);
 }
+function openNotificationItem(type, fromUser, referenceId){
+  if(type==='friend_request'){
+    if(fromUser && DB.users[fromUser]) go('profile',{username:fromUser});
+    else toast('Could not find this user profile.');
+    return;
+  }
+  openNotificationPost(referenceId);
+}
+async function respondToFriendRequestNotification(friendshipId, accept){
+  if(!supabaseClient || !session?.id || !friendshipId) return;
+  try{
+    let result;
+    if(accept){
+      result=await supabaseClient.from('friendships').update({status:'accepted',updated_at:new Date().toISOString()})
+        .eq('id',friendshipId).eq('addressee_id',session.id).eq('status','pending');
+    }else{
+      result=await supabaseClient.from('friendships').delete()
+        .eq('id',friendshipId).eq('addressee_id',session.id).eq('status','pending');
+    }
+    if(result.error) throw result.error;
+    await loadSupabasePosts();
+    await loadSupabaseNotifications();
+    renderApp();
+    toast(accept?'Friend request accepted!':'Friend request declined.');
+  }catch(error){console.error(error);toast(error.message||'Could not respond to friend request.');}
+}
+function notificationFriendRequestActions(n){
+  if(n.type!=='friend_request' || !n.referenceId) return '';
+  const target=esc(String(n.referenceId));
+  return `<div class="notif-actions" style="display:flex;gap:7px;margin-top:8px">
+    <button class="btn btn-primary btn-sm" onclick="event.stopPropagation();respondToFriendRequestNotification('${target}',true)">Accept</button>
+    <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();respondToFriendRequestNotification('${target}',false)">Decline</button>
+  </div>`;
+}
 function renderNotifications(){
   const list = DB.notifications[session.username]||[];
   const unread=list.filter(n=>!n.read);
@@ -1778,13 +1819,13 @@ function renderNotifications(){
       .then(({error})=>{if(error) console.error('Could not mark notifications read:',error);});
   }else if(unread.length){ save('notifications'); }
   const msg = {like:'liked your post', comment:'commented on your post', follow:'started following you',
-    group_request:'requested to join your group', group_approved:'approved your group request'};
+    friend_request:'sent you a friend request', group_request:'requested to join your group', group_approved:'approved your group request'};
   return `<div class="pagehead"><div class="section-title">Notifications</div></div>
   <div class="card" style="padding:4px 14px">
   ${list.length? list.map(n=>`
-    <div class="notif ${n.read?'':'unread'}" ${n.referenceId?`role="button" tabindex="0" onclick="openNotificationPost('${esc(String(n.referenceId))}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNotificationPost('${esc(String(n.referenceId))}')}" style="cursor:pointer"`:''}>
+    <div class="notif ${n.read?'':'unread'}" ${(n.type==='friend_request' || n.referenceId)?`role="button" tabindex="0" onclick="openNotificationItem('${esc(String(n.type))}','${esc(String(n.fromUser||''))}','${esc(String(n.referenceId||''))}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openNotificationItem('${esc(String(n.type))}','${esc(String(n.fromUser||''))}','${esc(String(n.referenceId||''))}')}" style="cursor:pointer"`:''}>
       ${avatarHTML(n.fromUser,36)}
-      <div style="flex:1;font-size:13.5px"><b>${esc(DB.users[n.fromUser]?.name||n.fromUser)}</b> ${msg[n.type]||n.type}<div class="faint" style="font-size:11.5px;margin-top:2px">${timeAgo(n.createdAt)}${n.referenceId? ' · View post':''}</div></div>
+      <div style="flex:1;font-size:13.5px"><b>${esc(DB.users[n.fromUser]?.name||n.fromUser)}</b> ${msg[n.type]||n.type}<div class="faint" style="font-size:11.5px;margin-top:2px">${timeAgo(n.createdAt)}${n.type==='friend_request'?'':(n.referenceId? ' · View post':'')}</div></div>
     </div>`).join('') : `<div class="empty"><div class="moon">🔔</div>No notifications yet.</div>`}
   </div>`;
 }
