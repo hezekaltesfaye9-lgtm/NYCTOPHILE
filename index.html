@@ -185,11 +185,17 @@ a{color:inherit; text-decoration:none;}
 .group-cover{width:64px; height:64px; border-radius:12px; object-fit:cover; flex-shrink:0; background:linear-gradient(135deg,var(--violet-dim),var(--blue));}
 .priv-badge{font-size:10.5px; padding:2px 7px; border-radius:6px; background:var(--panel-2); color:var(--text-faint); font-weight:700;}
 
+
+.share-recipient{display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.share-recipient input{width:17px;height:17px;accent-color:var(--violet);flex-shrink:0}
+.share-recipient .share-name{flex:1;min-width:0}
+.share-recipient .share-handle{font-size:11.5px;color:var(--text-faint)}
+.share-list{max-height:48vh;overflow:auto;margin:10px 0 16px}
 /* ---------- Notifications / Messages ---------- */
 .notif{display:flex; gap:12px; padding:13px 4px; align-items:center; border-bottom:1px solid var(--line);}
 .notif.unread{background:rgba(141,124,255,.05);}
 .convo{display:flex; gap:12px; padding:13px 4px; align-items:center; border-bottom:1px solid var(--line);}
-.msg-thread{display:flex; flex-direction:column; gap:8px; padding:16px 0; max-height:52vh; overflow-y:auto;}
+.msg-thread{display:flex; flex-direction:column; justify-content:flex-start; gap:8px; padding:16px 0; height:52vh; max-height:520px; min-height:220px; overflow-y:scroll !important; overflow-x:hidden; overscroll-behavior-y:contain; -webkit-overflow-scrolling:touch; touch-action:pan-y; scroll-behavior:smooth; scrollbar-gutter:stable;}
 .bubble{max-width:72%; padding:9px 13px; border-radius:16px; font-size:13.5px; line-height:1.4;}
 .bubble.me{align-self:flex-end; background:linear-gradient(135deg,var(--violet),#6E5FE0); color:#fff; border-bottom-right-radius:4px;}
 .bubble.them{align-self:flex-start; background:var(--panel-2); border-bottom-left-radius:4px;}
@@ -282,7 +288,7 @@ td{padding:11px 10px; border-bottom:1px solid var(--line); vertical-align:middle
   .group-card{padding:12px; gap:10px; align-items:flex-start;}
   .group-cover{width:54px;height:54px;}
   .notif,.convo{gap:9px; padding:11px 2px;}
-  .msg-thread{max-height:calc(100dvh - 260px); padding:12px 0;}
+  .msg-thread{height:calc(100dvh - 300px); max-height:none; min-height:220px; padding:12px 0; overflow-y:scroll !important; touch-action:pan-y; -webkit-overflow-scrolling:touch;}
   .bubble{max-width:86%;}
   .modal-bg{padding:10px; align-items:flex-end;}
   .modal{max-width:none; max-height:90dvh; border-radius:18px 18px 12px 12px; padding:20px 16px;}
@@ -404,7 +410,8 @@ function toast(msg){
   setTimeout(()=>el.remove(), 2600);
 }
 function esc(s){ return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function go(view, params={}){ route = {view, params}; renderApp(); window.scrollTo(0,0); if(view==='thread' && params.id){ subscribeToTyping(params.id); markConversationRead(params.id); } }
+function scrollChatToBottom(){ const box=document.querySelector('.msg-thread'); if(box){ box.scrollTop=box.scrollHeight; requestAnimationFrame(()=>{box.scrollTop=box.scrollHeight;}); } }
+function go(view, params={}){ route = {view, params}; renderApp(); window.scrollTo(0,0); if(view==='thread' && params.id){ subscribeToTyping(params.id); markConversationRead(params.id); requestAnimationFrame(()=>requestAnimationFrame(scrollChatToBottom)); } }
 
 function initials(name){ return (name||'?').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join('').toUpperCase(); }
 function avatarHTML(username, size=38){
@@ -918,10 +925,73 @@ async function toggleCommentLike(id){
 function postComments(postId){
   return Object.values(DB.comments).filter(c=>c.postId===postId).sort((a,b)=>a.createdAt-b.createdAt);
 }
-async function sharePost(postId){
-  const url = location.href.split('#')[0] + '#/post/'+postId;
-  try{ await navigator.clipboard.writeText(url); toast('Link copied 🔗'); }
-  catch(e){ toast('Post link: '+url); }
+function sharePost(postId){
+  if(!session?.id){ toast('Please log in to share a post.'); return; }
+  const post=DB.posts[postId] || DB.groupPosts[postId];
+  if(!post){ toast('Post not found.'); return; }
+  const mineFollowing=DB.follows?.[session.username]?.following||[];
+  const myFollowers=DB.follows?.[session.username]?.followers||[];
+  const names=[...new Set([...mineFollowing,...myFollowers])].filter(name=>name!==session.username && DB.users[name]?.id);
+  const list=names.sort((a,b)=>(DB.users[a]?.name||a).localeCompare(DB.users[b]?.name||b));
+  openModal(`
+    <h3>Share this post ✉️</h3>
+    <p class="muted" style="font-size:13px;margin:-8px 0 12px">Choose people who follow you or whom you follow.</p>
+    ${list.length?`
+      <div class="share-list">
+        <label class="share-recipient" style="border-bottom:1px solid var(--line)">
+          <input type="checkbox" id="share-select-all" onchange="document.querySelectorAll('.share-person').forEach(x=>x.checked=this.checked)">
+          <span class="share-name"><b>Select everyone</b></span>
+        </label>
+        ${list.map(name=>`<label class="share-recipient">
+          <input class="share-person" type="checkbox" value="${esc(name)}">
+          ${avatarHTML(name,36)}
+          <span class="share-name"><b>${esc(DB.users[name]?.name||name)}</b><br><span class="share-handle">@${esc(name)}</span></span>
+        </label>`).join('')}
+      </div>
+      <button class="btn btn-primary" style="width:100%" onclick="sendPostToSelected('${esc(String(postId))}')">Send post</button>
+    `:`<div class="empty" style="padding:28px 12px"><div class="moon">👥</div>No followers or following yet.</div>`}
+    <button class="btn btn-ghost" style="width:100%;margin-top:10px" onclick="copyPostLink('${esc(String(postId))}')">🔗 Copy post link</button>
+  `);
+}
+async function sendPostToSelected(postId){
+  if(!supabaseClient || !session?.id){ toast('Please log in again.'); return; }
+  const selected=[...document.querySelectorAll('.share-person:checked')].map(input=>input.value);
+  if(!selected.length){ toast('Choose at least one person.'); return; }
+  const button=modalRoot?.querySelector('.btn-primary');
+  if(button){button.disabled=true;button.textContent='Sending…';}
+  try{
+    const rows=selected.map(username=>({
+      sender_id:session.id,
+      recipient_id:DB.users[username]?.id,
+      post_id:String(postId)
+    }));
+    if(rows.some(row=>!row.recipient_id)) throw new Error('Could not identify one of the selected users. Please reload and try again.');
+    const {error}=await supabaseClient.from('shared_posts').insert(rows);
+    if(error) throw error;
+    // Also create a real chat message so the share appears in the recipient's inbox.
+    const postUrl=location.href.split('#')[0]+'#/post/'+encodeURIComponent(String(postId));
+    const messageRows=selected.map(username=>({
+      conversation_id:conversationIdFor(session.username,username),
+      sender_id:session.id,
+      receiver_id:DB.users[username].id,
+      content:'[[NYCTOPHILE_POST:'+String(postId)+']]'
+    }));
+    const {error:messageError}=await supabaseClient.from('messages').insert(messageRows);
+    if(messageError) throw messageError;
+    closeModal();
+    toast(`Post shared with ${selected.length} ${selected.length===1?'person':'people'}! ✨`);
+    await loadSupabaseMessages();
+    if(route.view==='messages' || route.view==='thread') renderApp();
+  }catch(error){
+    console.error('Post sharing failed:',error);
+    if(button){button.disabled=false;button.textContent='Send post';}
+    toast(error.message||'Could not share this post.');
+  }
+}
+async function copyPostLink(postId){
+  const url=location.href.split('#')[0]+'#/post/'+postId;
+  try{await navigator.clipboard.writeText(url);toast('Post link copied 🔗');}
+  catch(error){toast('Copy unavailable. Post link: '+url);}
 }
 
 /* ================= FOLLOW / UNFOLLOW ================= */
@@ -1126,6 +1196,34 @@ async function loadSupabaseMessages(){
     DB.conversations[id].updatedAt=new Date(row.created_at).getTime();
     (DB.messages[id] ||= []).push({id:row.id,senderId:sender,receiverId:receiver,content:row.content,createdAt:new Date(row.created_at).getTime(),deliveredAt:row.delivered_at,readAt:row.read_at});
   });
+  // Preload every shared post referenced in chats so recipients see its photo
+  // immediately when they open the conversation, even if it is not in their feed.
+  const sharedPostIds=[...new Set((rows||[]).map(row=>{
+    const match=String(row.content||'').match(/^\[\[NYCTOPHILE_POST:(.+)\]\]$/);
+    return match?match[1]:null;
+  }).filter(Boolean))].filter(id=>!DB.posts?.[id] && !DB.groupPosts?.[id]);
+  if(sharedPostIds.length){
+    const {data:sharedRows,error:sharedError}=await supabaseClient.from('posts')
+      .select('id,user_id,caption,image_url,image_urls,hashtags,category,created_at')
+      .in('id',sharedPostIds);
+    if(sharedError) throw sharedError;
+    const ownerIds=[...new Set((sharedRows||[]).map(post=>post.user_id).filter(Boolean))];
+    let ownerProfiles=[];
+    if(ownerIds.length){
+      const {data:profiles,error:profilesError}=await supabaseClient.from('profiles')
+        .select('id,username,display_name,avatar_url,bio').in('id',ownerIds);
+      if(profilesError) throw profilesError;
+      ownerProfiles=profiles||[];
+    }
+    const profilesById=Object.fromEntries(ownerProfiles.map(profile=>[profile.id,profile]));
+    (sharedRows||[]).forEach(row=>{
+      const profile=profilesById[row.user_id];
+      if(profile){const owner=profileToUser(profile);DB.users[owner.username]=owner;}
+      const username=profile?.username||('user_'+String(row.user_id).slice(0,8));
+      const images=Array.isArray(row.image_urls)&&row.image_urls.length?row.image_urls:(row.image_url?[row.image_url]:[]);
+      DB.posts[row.id]={id:row.id,userId:username,images,caption:row.caption||'',hashtags:row.hashtags||[],category:row.category||'Other',createdAt:new Date(row.created_at).getTime(),groupId:null};
+    });
+  }
   const {data:streakRows,error:streakError}=await supabaseClient.from('chat_streaks')
     .select('conversation_id,streak_count,last_mutual_date,user_one_id,user_two_id')
     .or(`user_one_id.eq.${session.id},user_two_id.eq.${session.id}`);
@@ -1206,7 +1304,23 @@ async function sendMessage(convoId, text){
     (DB.messages[convoId] ||= []).push({id:data.id,senderId:session.username,receiverId:to,content:data.content,createdAt:new Date(data.created_at).getTime(),deliveredAt:data.delivered_at,readAt:data.read_at});
     conv.updatedAt=new Date(data.created_at).getTime();
     renderApp();
+    requestAnimationFrame(()=>requestAnimationFrame(scrollChatToBottom));
   }catch(err){ console.error('NYCTOPHILE send message error:',err); toast(err.message || 'Message could not be sent.'); }
+}
+async function deleteMessage(convoId, messageId){
+  const message=(DB.messages[convoId]||[]).find(m=>String(m.id)===String(messageId));
+  if(!message || message.senderId!==session.username){ toast('You can only delete messages you sent.'); return; }
+  if(!confirm('Unsend this message for everyone in the conversation?')) return;
+  try{
+    const {error}=await supabaseClient.from('messages').delete().eq('id',messageId).eq('sender_id',session.id);
+    if(error) throw error;
+    DB.messages[convoId]=(DB.messages[convoId]||[]).filter(m=>String(m.id)!==String(messageId));
+    const remaining=DB.messages[convoId];
+    if(DB.conversations[convoId]) DB.conversations[convoId].updatedAt=remaining.length?remaining[remaining.length-1].createdAt:0;
+    renderApp();
+    requestAnimationFrame(()=>requestAnimationFrame(scrollChatToBottom));
+    toast('Message unsent for everyone.');
+  }catch(err){ console.error('NYCTOPHILE delete message error:',err); toast(err.message||'Could not delete message.'); }
 }
 async function deleteConversation(id){
   toast('Conversation history is saved securely and cannot be deleted from this view yet.');
@@ -1908,6 +2022,25 @@ function renderNotifications(){
 }
 
 /* ---- Messages ---- */
+function renderMessageContent(content, compact=false){
+  const match=String(content||'').match(/^\[\[NYCTOPHILE_POST:(.+)\]\]$/);
+  if(match){
+    if(compact) return '📷 Shared a post';
+    const postId=match[1];
+    const post=DB.posts?.[postId] || DB.groupPosts?.[postId];
+    const image=post?.images?.[0] || '';
+    const caption=post?.caption || '';
+    return `<div class="shared-post-preview" style="width:min(260px,100%);overflow:hidden;border:1px solid var(--border);border-radius:12px;background:var(--surface-2)">
+      ${image?`<img src="${esc(image)}" alt="Shared post photo" loading="lazy" onclick="openNotificationPost('${esc(postId)}')" style="display:block;width:100%;max-height:240px;object-fit:cover;cursor:pointer">`:`<div style="padding:18px;text-align:center;font-size:28px">📎</div>`}
+      <div style="padding:9px 10px">
+        <div style="font-size:12px;font-weight:700;margin-bottom:4px">Shared a post</div>
+        ${caption?`<div style="font-size:12px;line-height:1.4;overflow-wrap:anywhere;margin-bottom:8px">${esc(caption.slice(0,120))}${caption.length>120?'…':''}</div>`:''}
+        <button class="btn btn-ghost btn-sm" onclick="openNotificationPost('${esc(postId)}')">View post ↗</button>
+      </div>
+    </div>`;
+  }
+  return esc(content);
+}
 function renderMessagesList(){
   const convos = Object.values(DB.conversations).filter(c=>c.participants.includes(session.username)).sort((a,b)=>b.updatedAt-a.updatedAt);
   return `<div class="pagehead"><div class="section-title">Messages</div></div>
@@ -1919,7 +2052,7 @@ function renderMessagesList(){
     return `<div class="convo" style="cursor:pointer" onclick="go('thread',{id:'${c.id}'})">
       <span role="button" tabindex="0" title="View profile" onclick="event.stopPropagation();go('profile',{username:'${esc(other)}'})" onkeydown="if(event.key==='Enter'){event.stopPropagation();go('profile',{username:'${esc(other)}'})}">${avatarHTML(other,42)}</span>
       <div style="flex:1;min-width:0"><div role="button" tabindex="0" style="font-weight:600;font-size:14px;cursor:pointer" onclick="event.stopPropagation();go('profile',{username:'${esc(other)}'})" onkeydown="if(event.key==='Enter'){event.stopPropagation();go('profile',{username:'${esc(other)}'})}"><span class="presence-dot ${isUserOnline(other)?'online':''}"></span>${esc(DB.users[other]?.name||other)}</div>
-      <div class="faint" style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${last?esc(last.content):'Start the conversation'}</div></div>
+      <div class="faint" style="font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${last?renderMessageContent(last.content,true):'Start the conversation'}</div></div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px"><span class="faint" style="font-size:11px">${last?timeAgo(last.createdAt):''}</span>${chatStreakBadge(c.id)}</div>
     </div>`;
   }).join('') : `<div class="empty"><div class="moon">💬</div>No conversations yet.</div>`}
@@ -1937,7 +2070,7 @@ function renderThread(id){
   ${streakRestorePanel(id)}
   <div class="card" style="padding:14px">
     <div class="msg-thread">
-      ${msgs.length? msgs.map(m=>`<div class="message-row" style="display:flex;flex-direction:column;align-items:${m.senderId===session.username?'flex-end':'flex-start'};margin:6px 0"><div class="bubble ${m.senderId===session.username?'me':'them'}">${esc(m.content)}</div>${m.senderId===session.username?`<div class="faint" style="font-size:10px;margin:2px 6px">${m.readAt?'✓✓ Seen':m.deliveredAt?'✓✓ Delivered':'✓ Sent'}</div>`:''}</div>`).join('') : `<div class="empty faint" style="padding:30px">Say hello 👋</div>`}
+      ${msgs.length? msgs.map(m=>`<div class="message-row" style="display:flex;flex-direction:column;align-items:${m.senderId===session.username?'flex-end':'flex-start'};margin:6px 0"><div style="display:flex;align-items:center;gap:6px;max-width:100%;${m.senderId===session.username?'flex-direction:row-reverse;':''}"><div class="bubble ${m.senderId===session.username?'me':'them'}">${renderMessageContent(m.content)}</div>${m.senderId===session.username?`<button class="btn-icon" title="Delete message" aria-label="Delete message" style="width:28px;height:28px;font-size:14px;opacity:.75" onclick="deleteMessage('${id}','${m.id}')">⋯</button>`:''}</div>${m.senderId===session.username?`<div class="faint" style="font-size:10px;margin:2px 6px">${m.readAt?'✓✓ Seen':m.deliveredAt?'✓✓ Delivered':'✓ Sent'}</div>`:''}</div>`).join('') : `<div class="empty faint" style="padding:30px">Say hello 👋</div>`}
     </div>
     <div id="typingLabel" class="typing-label">${someoneTyping?'Typing…':''}</div>
     <div class="comment-input" style="margin-top:6px">
