@@ -1310,6 +1310,7 @@ async function sendMessage(convoId, text){
 async function sendChatFile(convoId, suppliedFile=null){
   const input=document.getElementById('threadFile'); const file=suppliedFile || input?.files?.[0];
   if(!file){toast('Choose a photo or file first.');return;}
+  if(!file.size){toast('This recording is empty. Please record again for a few seconds.');return;}
   if(file.size>20*1024*1024){toast('Files must be 20 MB or smaller.');return;}
   const conv=DB.conversations[convoId]; if(!conv||!session?.id||!supabaseClient)return;
   const to=conv.participants.find(p=>p!==session.username), receiver=DB.users[to];
@@ -1330,14 +1331,46 @@ async function sendChatFile(convoId, suppliedFile=null){
 let chatRecorder=null, chatRecordingChunks=[];
 async function toggleVoiceRecording(convoId){
   const btn=document.getElementById('voiceBtn');
-  if(chatRecorder && chatRecorder.state==='recording'){chatRecorder.stop();if(btn)btn.textContent='🎤';return;}
+  if(chatRecorder && chatRecorder.state==='recording'){
+    const recorder=chatRecorder;
+    if(btn) btn.textContent='…';
+    try{ if(recorder.state==='recording') recorder.stop(); }
+    catch(err){ console.error('Could not stop voice recording:',err); toast('Could not finish the voice recording. Please try again.'); if(btn)btn.textContent='🎤'; }
+    return;
+  }
   if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){toast('Voice recording is not supported in this browser.');return;}
+  let stream;
   try{
-    const stream=await navigator.mediaDevices.getUserMedia({audio:true});chatRecordingChunks=[];chatRecorder=new MediaRecorder(stream);
-    chatRecorder.ondataavailable=e=>{if(e.data?.size)chatRecordingChunks.push(e.data);};
-    chatRecorder.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());const blob=new Blob(chatRecordingChunks,{type:chatRecorder.mimeType||'audio/webm'});const file=new File([blob],'voice-message.webm',{type:blob.type});await sendChatFile(convoId,file);};
-    chatRecorder.start();if(btn)btn.textContent='⏹';toast('Recording… tap the microphone again to send.');
-  }catch(err){console.error(err);toast('Microphone permission was denied or unavailable.');}
+    stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    const mimeCandidates=['audio/webm;codecs=opus','audio/webm','audio/mp4'];
+    const mimeType=mimeCandidates.find(type=>MediaRecorder.isTypeSupported?.(type))||'';
+    const recorder=mimeType?new MediaRecorder(stream,{mimeType}):new MediaRecorder(stream);
+    chatRecorder=recorder;
+    chatRecordingChunks=[];
+    const chunks=chatRecordingChunks;
+    recorder.ondataavailable=e=>{if(e.data && e.data.size>0) chunks.push(e.data);};
+    recorder.onerror=e=>{console.error('Voice recorder error:',e.error||e);toast('Recording failed. Check microphone permission and try again.');};
+    recorder.onstop=async()=>{
+      stream.getTracks().forEach(t=>t.stop());
+      const actualType=recorder.mimeType||chunks.find(c=>c.type)?.type||'audio/webm';
+      const blob=new Blob(chunks,{type:actualType});
+      if(chatRecorder===recorder) chatRecorder=null;
+      if(btn) btn.textContent='🎤';
+      if(!blob.size){toast('No audio was recorded. Allow microphone access, speak for a few seconds, then try again.');return;}
+      const ext=actualType.includes('mp4')?'m4a':actualType.includes('ogg')?'ogg':'webm';
+      const voiceFile=new File([blob],`voice-message-${Date.now()}.${ext}`,{type:actualType});
+      await sendChatFile(convoId,voiceFile);
+    };
+    recorder.start(250);
+    if(btn) btn.textContent='⏹';
+    toast('Recording… tap the button again to send.');
+  }catch(err){
+    console.error('Voice recording start failed:',err);
+    if(stream) stream.getTracks().forEach(t=>t.stop());
+    if(chatRecorder && chatRecorder.state!=='recording') chatRecorder=null;
+    if(btn) btn.textContent='🎤';
+    toast(err?.message||'Microphone permission was denied or unavailable.');
+  }
 }
 async function deleteMessage(convoId, messageId){
   const message=(DB.messages[convoId]||[]).find(m=>String(m.id)===String(messageId));
