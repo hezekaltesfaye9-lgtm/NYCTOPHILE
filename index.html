@@ -1307,6 +1307,38 @@ async function sendMessage(convoId, text){
     requestAnimationFrame(()=>requestAnimationFrame(scrollChatToBottom));
   }catch(err){ console.error('NYCTOPHILE send message error:',err); toast(err.message || 'Message could not be sent.'); }
 }
+async function sendChatFile(convoId, suppliedFile=null){
+  const input=document.getElementById('threadFile'); const file=suppliedFile || input?.files?.[0];
+  if(!file){toast('Choose a photo or file first.');return;}
+  if(file.size>20*1024*1024){toast('Files must be 20 MB or smaller.');return;}
+  const conv=DB.conversations[convoId]; if(!conv||!session?.id||!supabaseClient)return;
+  const to=conv.participants.find(p=>p!==session.username), receiver=DB.users[to];
+  if(!receiver?.id){toast('Recipient account could not be found.');return;}
+  try{
+    const safeName=file.name.replace(/[^a-zA-Z0-9._-]/g,'_');
+    const path=session.id+'/'+Date.now()+'_'+safeName;
+    const {error:uploadError}=await supabaseClient.storage.from('chat-attachments').upload(path,file,{upsert:false});
+    if(uploadError) throw uploadError;
+    const {data:urlData}=supabaseClient.storage.from('chat-attachments').getPublicUrl(path);
+    const content='[[NYCTOPHILE_FILE:'+JSON.stringify({name:file.name,type:file.type,size:file.size,url:urlData.publicUrl})+']]';
+    const {data,error}=await supabaseClient.from('messages').insert({conversation_id:convoId,sender_id:session.id,receiver_id:receiver.id,content}).select('id,conversation_id,sender_id,receiver_id,content,created_at,delivered_at,read_at').single();
+    if(error) throw error;
+    (DB.messages[convoId] ||= []).push({id:data.id,senderId:session.username,receiverId:to,content:data.content,createdAt:new Date(data.created_at).getTime(),deliveredAt:data.delivered_at,readAt:data.read_at});
+    conv.updatedAt=new Date(data.created_at).getTime(); input.value='';renderApp();requestAnimationFrame(()=>requestAnimationFrame(scrollChatToBottom));
+  }catch(err){console.error('Attachment send failed:',err);toast(err.message||'Attachment could not be sent. Check that the chat-attachments Storage bucket exists and permits upload.');}
+}
+let chatRecorder=null, chatRecordingChunks=[];
+async function toggleVoiceRecording(convoId){
+  const btn=document.getElementById('voiceBtn');
+  if(chatRecorder && chatRecorder.state==='recording'){chatRecorder.stop();if(btn)btn.textContent='🎤';return;}
+  if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){toast('Voice recording is not supported in this browser.');return;}
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({audio:true});chatRecordingChunks=[];chatRecorder=new MediaRecorder(stream);
+    chatRecorder.ondataavailable=e=>{if(e.data?.size)chatRecordingChunks.push(e.data);};
+    chatRecorder.onstop=async()=>{stream.getTracks().forEach(t=>t.stop());const blob=new Blob(chatRecordingChunks,{type:chatRecorder.mimeType||'audio/webm'});const file=new File([blob],'voice-message.webm',{type:blob.type});await sendChatFile(convoId,file);};
+    chatRecorder.start();if(btn)btn.textContent='⏹';toast('Recording… tap the microphone again to send.');
+  }catch(err){console.error(err);toast('Microphone permission was denied or unavailable.');}
+}
 async function deleteMessage(convoId, messageId){
   const message=(DB.messages[convoId]||[]).find(m=>String(m.id)===String(messageId));
   if(!message || message.senderId!==session.username){ toast('You can only delete messages you sent.'); return; }
@@ -2039,6 +2071,24 @@ function renderMessageContent(content, compact=false){
       </div>
     </div>`;
   }
+  // Legacy fallback: render standalone public Storage URLs as previews instead of plain links.
+  const rawUrl=String(content||'').trim();
+  if(/^https?:\/\//i.test(rawUrl) && rawUrl.includes('/storage/v1/object/public/')){
+    if(compact) return '📎 Attachment';
+    const cleanUrl=rawUrl.split('?')[0];
+    const imageUrl=/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(cleanUrl);
+    const audioUrl=/\.(webm|mp3|m4a|ogg|wav)$/i.test(cleanUrl);
+    if(imageUrl) return `<div style=\"max-width:260px\"><a href=\"${esc(rawUrl)}\" target=\"_blank\" rel=\"noopener\"><img src=\"${esc(rawUrl)}\" alt=\"Shared image\" loading=\"lazy\" style=\"max-width:100%;max-height:260px;border-radius:12px;display:block\"></a></div>`;
+    if(audioUrl) return `<audio controls src=\"${esc(rawUrl)}\" style=\"max-width:100%\"></audio>`;
+    return `<a href=\"${esc(rawUrl)}\" target=\"_blank\" rel=\"noopener\">📎 Open attachment</a>`;
+  }
+  const attachmentMatch=String(content||'').match(/^\[\[NYCTOPHILE_FILE:(.+)\]\]$/);
+  if(attachmentMatch){
+    let meta; try{meta=JSON.parse(attachmentMatch[1]);}catch(e){return '📎 Attachment';}
+    if(compact) return meta?.name ? '📎 '+esc(meta.name) : '📎 Attachment';
+    const isImage=(meta.type||'').startsWith('image/');
+    return `<div style="max-width:260px;overflow-wrap:anywhere">${(meta.type||'').startsWith('audio/')?`<audio controls src="${esc(meta.url)}" style="max-width:100%"></audio>`:isImage?`<a href="${esc(meta.url)}" target="_blank" rel="noopener"><img src="${esc(meta.url)}" alt="${esc(meta.name||'Image')}" style="max-width:100%;max-height:260px;border-radius:12px;display:block"></a>`:`<div style="padding:12px;border:1px solid var(--line);border-radius:12px">📎 <strong>${esc(meta.name||'File')}</strong><div class="faint" style="font-size:11px">${Math.round((meta.size||0)/1024)} KB</div></div>`}<a class="btn btn-ghost btn-sm" href="${esc(meta.url)}" target="_blank" rel="noopener" download="${esc(meta.name||'attachment')}">Open / Download</a></div>`;
+  }
   return esc(content);
 }
 function renderMessagesList(){
@@ -2073,8 +2123,11 @@ function renderThread(id){
       ${msgs.length? msgs.map(m=>`<div class="message-row" style="display:flex;flex-direction:column;align-items:${m.senderId===session.username?'flex-end':'flex-start'};margin:6px 0"><div style="display:flex;align-items:center;gap:6px;max-width:100%;${m.senderId===session.username?'flex-direction:row-reverse;':''}"><div class="bubble ${m.senderId===session.username?'me':'them'}">${renderMessageContent(m.content)}</div>${m.senderId===session.username?`<button class="btn-icon" title="Delete message" aria-label="Delete message" style="width:28px;height:28px;font-size:14px;opacity:.75" onclick="deleteMessage('${id}','${m.id}')">⋯</button>`:''}</div>${m.senderId===session.username?`<div class="faint" style="font-size:10px;margin:2px 6px">${m.readAt?'✓✓ Seen':m.deliveredAt?'✓✓ Delivered':'✓ Sent'}</div>`:''}</div>`).join('') : `<div class="empty faint" style="padding:30px">Say hello 👋</div>`}
     </div>
     <div id="typingLabel" class="typing-label">${someoneTyping?'Typing…':''}</div>
-    <div class="comment-input" style="margin-top:6px">
+    <div class="comment-input" style="margin-top:6px;display:flex;gap:8px;align-items:center">
+      <input type="file" id="threadFile" accept="image/*,.pdf,.doc,.docx,.txt,.zip" style="display:none" onchange="sendChatFile('${id}')" title="Attach photo or file">
+      <button class="btn btn-ghost btn-sm" onclick="document.getElementById('threadFile').click()" title="Add photo or file" style="font-size:22px;width:42px">＋</button>
       <input id="threadInput" placeholder="Message…" oninput="sendTypingState(this.value.trim().length>0)" onkeydown="if(event.key==='Enter'){sendTypingState(false);sendMessage('${id}',this.value);this.value='';}">
+      <button class="btn btn-ghost btn-sm" id="voiceBtn" onclick="toggleVoiceRecording('${id}')" title="Record voice message">🎤</button>
       <button class="btn btn-primary btn-sm" onclick="const i=document.getElementById('threadInput'); sendMessage('${id}',i.value); i.value='';">Send</button>
     </div>
   </div>`;
